@@ -1,0 +1,259 @@
+import network
+import socket
+from time import sleep
+from machine import Pin, PWM, reset, time_pulse_us
+
+# Wi-Fi credentials
+ssid = 'Han iPhone’u'
+password = '29121968'
+
+# Motor A pins
+IN1 = Pin(2, Pin.OUT)
+IN2 = Pin(3, Pin.OUT)
+ENA = PWM(Pin(4))
+ENA.freq(1000)
+
+# Motor B pins
+IN3 = Pin(5, Pin.OUT)
+IN4 = Pin(6, Pin.OUT)
+ENB = PWM(Pin(7))
+ENB.freq(1000)
+
+# Ultrasonic sensor pins
+TRIG = Pin(8, Pin.OUT)
+ECHO = Pin(9, Pin.IN)
+
+speed = 50000  # PWM duty cycle for motor speed
+
+# Global flag for auto mode
+auto_mode = False
+
+# Movement functions
+def move_forward():
+    IN1.value(1)
+    IN2.value(0)
+    ENA.duty_u16(speed)
+
+    IN3.value(1)
+    IN4.value(0)
+    ENB.duty_u16(speed)
+
+def move_backward():
+    IN1.value(0)
+    IN2.value(1)
+    ENA.duty_u16(speed)
+
+    IN3.value(0)
+    IN4.value(1)
+    ENB.duty_u16(speed)
+
+def move_left():
+    IN3.value(0)
+    IN4.value(0)
+    ENB.duty_u16(0)
+
+    IN1.value(1)
+    IN2.value(0)
+    ENA.duty_u16(speed)
+
+def move_right():
+    IN1.value(0)
+    IN2.value(0)
+    ENA.duty_u16(0)
+
+    IN3.value(1)
+    IN4.value(0)
+    ENB.duty_u16(speed)
+
+def move_stop():
+    ENA.duty_u16(0)
+    ENB.duty_u16(0)
+
+# Constants for rotation and distances
+TURN_SLEEP_TIME = 0.62  # Adjust this to get a perfect 90° turn
+NUM_TURNS = 4
+MIN_DISTANCE = 10
+TOO_CLOSE = 5
+REPEAT_THRESHOLD = 0.5  # Max variation to consider distances "same"
+BACK_OFF_TIME = 0.4
+
+def rotate_left_90():
+    IN1.value(0)
+    IN2.value(1)
+    IN3.value(1)
+    IN4.value(0)
+    ENA.duty_u16(speed)
+    ENB.duty_u16(speed)
+    sleep(TURN_SLEEP_TIME)
+    move_stop()
+    sleep(0.2)
+
+def rotate_right_90():
+    IN1.value(1)
+    IN2.value(0)
+    IN3.value(0)
+    IN4.value(1)
+    ENA.duty_u16(speed)
+    ENB.duty_u16(speed)
+    sleep(TURN_SLEEP_TIME)
+    move_stop()
+    sleep(0.2)
+
+def backup():
+    move_backward()
+    sleep(BACK_OFF_TIME)
+    move_stop()
+
+def scan_surroundings():
+    distances = []
+    for _ in range(NUM_TURNS):
+        distance = get_distance()
+        distances.append(distance)
+        rotate_left_90()
+    return distances
+
+def find_best_direction(distances):
+    max_dist = max(distances)
+    index = distances.index(max_dist)
+    return index  # Number of left turns to best path
+
+def get_distance():
+    TRIG.value(0)
+    sleep(0.000002)
+    TRIG.value(1)
+    sleep(0.00001)
+    TRIG.value(0)
+
+    pulse_duration = time_pulse_us(ECHO, 1, 30000)  # timeout in µs
+    if pulse_duration < 0:
+        return 1000  # no echo received, return a big number (no obstacle)
+    distance = (pulse_duration * 0.0343) / 2  # cm
+    return distance
+
+def auto_maze():
+    global auto_mode
+    auto_mode = True
+    print("Auto Maze Mode ON")
+    while auto_mode:
+        distance = get_distance()
+        print(f"Distance: {distance:.2f} cm")
+
+        if distance < TOO_CLOSE:
+            print("Too close! Backing up...")
+            backup()
+
+        if distance < MIN_DISTANCE:
+            print("Obstacle detected! Scanning...")
+            backup()
+            distances = scan_surroundings()
+            print("Distances:", [round(d, 2) for d in distances])
+
+            if max(distances) - min(distances) < REPEAT_THRESHOLD:
+                print("All directions similar. Backing up and retrying...")
+                backup()
+                distances = scan_surroundings()
+
+            best_turns = find_best_direction(distances)
+            print(f"Best direction is {best_turns * 90}° to the left")
+
+            # Rotate back to best direction
+            for _ in range(best_turns):
+                rotate_left_90()
+            move_forward()
+        else:
+            move_forward()
+
+        sleep(0.1)
+
+    move_stop()
+    print("Auto Maze Mode OFF")
+
+# Web server and other functions remain the same, omitted here for brevity
+
+# Connect to Wi-Fi
+def connect():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.connect(ssid, password)
+    while not wlan.isconnected():
+        print("Connecting to Wi-Fi...")
+        sleep(1)
+    ip = wlan.ifconfig()[0]
+    print(f"Connected on {ip}")
+    return ip
+
+# Open socket
+def open_socket(ip):
+    address = (ip, 80)
+    s = socket.socket()
+    s.bind(address)
+    s.listen(1)
+    return s
+
+# HTML page
+def webpage():
+    html = """<!DOCTYPE html>
+<html>
+<head><title>Pico Car</title></head>
+<body style="text-align:center">
+<h1>Control Panel</h1>
+<form action="/forward" method="GET"><input type="submit" value="Forward" style="height:100px;width:150px" /></form>
+<table style="margin:auto"><tr>
+<td><form action="/left" method="GET"><input type="submit" value="Left" style="height:100px;width:150px" /></form></td>
+<td><form action="/stop" method="GET"><input type="submit" value="Stop" style="height:100px;width:150px" /></form></td>
+<td><form action="/right" method="GET"><input type="submit" value="Right" style="height:100px;width:150px" /></form></td>
+</tr></table>
+<form action="/backward" method="GET"><input type="submit" value="Backward" style="height:100px;width:150px" /></form>
+<form action="/auto_maze" method="GET"><input type="submit" value="Auto Maze" style="height:100px;width:150px" /></form>
+</body>
+</html>"""
+    return html
+
+# Handle web requests
+def serve(socket):
+    global auto_mode
+    while True:
+        client = socket.accept()[0]
+        request = client.recv(1024)
+        request = str(request)
+        print("Request:", request)
+
+        try:
+            path = request.split(' ')[1]
+        except IndexError:
+            path = '/'
+
+        if path.startswith('/forward'):
+            auto_mode = False
+            move_forward()
+        elif path.startswith('/backward'):
+            auto_mode = False
+            move_backward()
+        elif path.startswith('/left'):
+            auto_mode = False
+            move_left()
+        elif path.startswith('/right'):
+            auto_mode = False
+            move_right()
+        elif path.startswith('/stop'):
+            auto_mode = False
+            move_stop()
+        elif path.startswith('/auto_maze'):
+            auto_maze()
+
+        client.send('HTTP/1.1 200 OK\r\n')
+        client.send('Content-Type: text/html\r\n')
+        client.send('Connection: close\r\n\r\n')
+        client.sendall(webpage())
+        client.close()
+
+# Start program
+try:
+    move_stop()
+    ip = connect()
+    s = open_socket(ip)
+    serve(s)
+except KeyboardInterrupt:
+    move_stop()
+    reset()
+
